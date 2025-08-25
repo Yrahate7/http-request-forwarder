@@ -39,7 +39,7 @@ POST /add_target/{id}
 Content-Type: application/json
 
 {
-  "url": "http://localhost:9000/endpoint1"
+  "url": "http://localhost:9000/endpoint"
 }
 ```
 
@@ -53,7 +53,7 @@ POST /remove_target/{id}
 Content-Type: application/json
 
 {
-  "url": "http://localhost:9000/endpoint1"
+  "url": "http://localhost:9000/endpoint"
 }
 ```
 
@@ -71,8 +71,8 @@ Response:
 {
   "id": "myid",
   "targets": [
-    "http://localhost:9000/endpoint1",
-    "http://localhost:9001/endpoint2"
+    "http://localhost:9000/endpoint",
+    "http://localhost:9001/endpoint"
   ]
 }
 ```
@@ -85,7 +85,7 @@ POST /fanout/{id}/{tail...}
 ```
 
 - Forwards the request to **all configured URLs** for `{id}`.  
-- `{tail...}` (optional) is appended to the target URLs.  
+- `{tail...}` (optional) is appended to the target URLs, However you must append "/" even if not passing any tail argument to ensure the requests are forwarded correctly.  
 - Headers and body are preserved.  
 - Always returns immediately:
 
@@ -113,11 +113,11 @@ This will forward the request to all configured URLs under `myid` with `/testpat
 # Add targets
 curl -X POST http://localhost:8080/add_target/myid \
      -H "Content-Type: application/json" \
-     -d '{"url":"http://localhost:9000/endpoint1"}'
+     -d '{"url":"http://localhost:9000/endpoint"}'
 
 curl -X POST http://localhost:8080/add_target/myid \
      -H "Content-Type: application/json" \
-     -d '{"url":"http://localhost:9001/endpoint2"}'
+     -d '{"url":"http://localhost:9001/endpoint"}'
 
 # List targets
 curl http://localhost:8080/list_targets/myid
@@ -136,8 +136,8 @@ curl -X POST http://localhost:8080/fanout/myid/test \
 - Failures are logged to `stdout`, e.g.:
 
 ```
-Fanout to http://localhost:9000/endpoint1 failed with status 500
-Fanout to http://localhost:9001/endpoint2 error: connection refused
+Fanout to http://localhost:9000/endpoint failed with status 500
+Fanout to http://localhost:9001/endpoint error: connection refused
 ```
 
 ---

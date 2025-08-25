@@ -1,149 +1,102 @@
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, post, web};
-use bytes::Bytes;
-use reqwest::Client;
-use serde::Deserialize;
-use serde_json::json;
+use actix_web::{App, HttpResponse, HttpServer, Responder, web};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use tokio::task;
+use std::fs;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-#[derive(Clone)]
-struct AppState {
-    targets: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    client: Client,
-}
+type Targets = HashMap<String, Vec<String>>;
 
 #[derive(Deserialize)]
-struct TargetPayload {
+struct TargetRequest {
     url: String,
 }
 
-#[post("/add_target/{id}")]
+async fn read_targets(file: &str) -> Targets {
+    match fs::read_to_string(file) {
+        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+async fn write_targets(file: &str, targets: &Targets) {
+    if let Ok(json) = serde_json::to_string_pretty(targets) {
+        let _ = fs::write(file, json);
+    }
+}
+
 async fn add_target(
-    state: web::Data<AppState>,
     path: web::Path<String>,
-    payload: web::Json<TargetPayload>,
+    target: web::Json<TargetRequest>,
+    data: web::Data<AppState>,
 ) -> impl Responder {
     let id = path.into_inner();
-    let mut guard = state.targets.write().unwrap();
-    guard
-        .entry(id.clone())
-        .or_default()
-        .push(payload.url.clone());
-
-    HttpResponse::Ok().json(json!({
-        "status": "added",
-        "id": id,
-        "url": payload.url
-    }))
+    let mut targets = read_targets(&data.file).await;
+    targets.entry(id).or_default().push(target.url.clone());
+    write_targets(&data.file, &targets).await;
+    HttpResponse::Ok().json(targets)
 }
 
-#[post("/remove_target/{id}")]
 async fn remove_target(
-    state: web::Data<AppState>,
     path: web::Path<String>,
-    payload: web::Json<TargetPayload>,
+    target: web::Json<TargetRequest>,
+    data: web::Data<AppState>,
 ) -> impl Responder {
     let id = path.into_inner();
-    let mut guard = state.targets.write().unwrap();
-    if let Some(urls) = guard.get_mut(&id) {
-        urls.retain(|u| u != &payload.url);
+    let mut targets = read_targets(&data.file).await;
+    if let Some(urls) = targets.get_mut(&id) {
+        urls.retain(|u| u != &target.url);
     }
-
-    HttpResponse::Ok().json(json!({
-        "status": "removed",
-        "id": id,
-        "url": payload.url
-    }))
+    write_targets(&data.file, &targets).await;
+    HttpResponse::Ok().json(targets)
 }
 
-#[post("/fanout/{id}/{tail:.*}")]
+async fn list_targets(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
+    let id = path.into_inner();
+    let targets = read_targets(&data.file).await;
+    let urls = targets.get(&id).cloned().unwrap_or_default();
+    HttpResponse::Ok().json(urls)
+}
+
 async fn fanout(
-    req: HttpRequest,
-    body: Bytes,
-    state: web::Data<AppState>,
     path: web::Path<(String, String)>,
+    body: String,
+    data: web::Data<AppState>,
 ) -> impl Responder {
-    let (id, tail) = path.into_inner();
-    let headers: Vec<(String, String)> = req
-        .headers()
-        .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.to_string(), s.to_string())))
-        .collect();
+    let (id, _suffix) = path.into_inner();
+    let targets = read_targets(&data.file).await;
 
-    let body_vec = body.to_vec();
-    let method = req.method().clone();
-
-    let urls = {
-        let guard = state.targets.read().unwrap();
-        guard.get(&id).cloned().unwrap_or_default()
-    };
-
-    if urls.is_empty() {
-        return HttpResponse::NotFound().json(json!({
-            "error": format!("No targets configured for id {}", id)
-        }));
+    if let Some(urls) = targets.get(&id) {
+        for url in urls {
+            let url = url.clone();
+            let body = body.clone();
+            actix_web::rt::spawn(async move {
+                if let Err(err) = reqwest::Client::new().post(&url).body(body).send().await {
+                    eprintln!("❌ Failed to send to {}: {}", url, err);
+                }
+            });
+        }
     }
 
-    let client = state.client.clone();
-    task::spawn(async move {
-        for target in urls {
-            let url = if tail.is_empty() {
-                target.clone()
-            } else {
-                format!("{}/{}", target.trim_end_matches('/'), tail)
-            };
-
-            let mut req_builder = client.request(method.clone(), &url).body(body_vec.clone());
-            for (k, v) in &headers {
-                req_builder = req_builder.header(k, v);
-            }
-
-            match req_builder.send().await {
-                Ok(resp) => {
-                    if !resp.status().is_success() {
-                        println!("Fanout to {} failed with status {}", url, resp.status());
-                    }
-                }
-                Err(e) => {
-                    println!("Fanout to {} error: {}", url, e);
-                }
-            }
-        }
-    });
-
-    HttpResponse::Ok().json(json!({
-        "status": "queued",
-        "id": id
-    }))
+    HttpResponse::Ok().body("ok")
 }
 
-#[get("/list_targets/{id}")]
-async fn list_targets(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
-    let id = path.into_inner();
-    let guard = state.targets.read().unwrap();
-    let urls = guard.get(&id).cloned().unwrap_or_default();
-
-    HttpResponse::Ok().json(json!({
-        "id": id,
-        "targets": urls
-    }))
+struct AppState {
+    file: String,
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let state = AppState {
-        targets: Arc::new(RwLock::new(HashMap::new())),
-        client: Client::new(),
-    };
+    let args: Vec<String> = std::env::args().collect();
+    let file = args.get(1).cloned().unwrap_or("targets.json".to_string());
 
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(state.clone()))
-            .service(add_target)
-            .service(remove_target)
-            .service(list_targets)
-            .service(fanout)
+            .app_data(web::Data::new(AppState { file: file.clone() }))
+            .route("/add_target/{id}", web::post().to(add_target))
+            .route("/remove_target/{id}", web::post().to(remove_target))
+            .route("/list_targets/{id}", web::get().to(list_targets))
+            .route("/fanout/{id}/{suffix:.*}", web::post().to(fanout))
     })
     .bind(("0.0.0.0", 8080))?
     .run()
