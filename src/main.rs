@@ -1,24 +1,45 @@
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
 use reqwest::Client;
-use std::{fs, sync::Arc};
+use serde::Deserialize;
+use std::{collections::HashMap, fs, sync::Arc};
 
+//
+// ============================
+// CONFIG STRUCTS
+// ============================
+//
+
+type RouteTargets = HashMap<String, Vec<String>>;
+
+#[derive(Clone)]
 struct AppState {
-    targets: Arc<Vec<String>>,
+    routes: Arc<RouteTargets>,
     client: Client,
 }
 
+//
+// ============================
+// FANOUT HANDLER
+// ============================
+//
+
 async fn fanout(req: HttpRequest, body: web::Bytes, data: web::Data<AppState>) -> HttpResponse {
-    let client = data.client.clone();
-    let targets = data.targets.clone();
+    let path = req.path().to_string();
+
+    let targets = match data.routes.get(&path) {
+        Some(t) => t.clone(),
+        None => return HttpResponse::NotFound().body("Route not configured"),
+    };
+
     let headers = req.headers().clone();
     let body = body.clone();
+    let client = data.client.clone();
 
     tokio::spawn(async move {
-        for url in targets.iter() {
+        for url in targets {
             let client = client.clone();
             let headers = headers.clone();
             let body = body.clone();
-            let url = url.clone();
 
             tokio::spawn(async move {
                 let mut fwd = client.post(&url).body(body);
@@ -37,33 +58,56 @@ async fn fanout(req: HttpRequest, body: web::Bytes, data: web::Data<AppState>) -
         }
     });
 
-    // respond immediately
     HttpResponse::Ok().body("Forwarded")
 }
 
+//
+// ============================
+// LOAD ROUTES FROM JSON
+// ============================
+//
+
+fn load_routes_from_file(path: &str) -> RouteTargets {
+    let content = fs::read_to_string(path).expect("Failed to read routes.json");
+
+    serde_json::from_str(&content).expect("Invalid routes.json format")
+}
+
+//
+// ============================
+// MAIN
+// ============================
+//
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    // Load targets.txt
-    let contents = fs::read_to_string("targets.txt").unwrap_or_default();
-    let targets: Vec<String> = contents
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.trim().to_string())
-        .collect();
+    let routes = load_routes_from_file("routes.json");
 
-    println!("✅ Loaded targets: {:?}", targets);
+    if routes.is_empty() {
+        panic!("routes.json is empty — no routes configured");
+    }
+
+    println!("🚦 Loaded routes:");
+    for (route, targets) in &routes {
+        println!("  {} -> {:?}", route, targets);
+    }
 
     let state = web::Data::new(AppState {
-        targets: Arc::new(targets),
+        routes: Arc::new(routes),
         client: Client::new(),
     });
 
     HttpServer::new(move || {
-        App::new()
-            .app_data(state.clone())
-            .route("/fanout", web::post().to(fanout))
+        let mut app = App::new().app_data(state.clone());
+
+        // Dynamically register all routes
+        for route in state.routes.keys() {
+            app = app.route(route, web::post().to(fanout));
+        }
+
+        app
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(("0.0.0.0", 8080))?
     .run()
     .await
 }

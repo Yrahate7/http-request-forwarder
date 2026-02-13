@@ -1,0 +1,5 @@
+{
+  "/fanout": ["http://localhost:9001", "http://localhost:9002"],
+  "/razorpay": ["http://localhost:9101"],
+  "/stripe": ["http://localhost:9201", "http://localhost:9202"]
+}
